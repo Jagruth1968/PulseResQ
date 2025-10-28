@@ -1,0 +1,11 @@
+POST http://localhost:3000/api/alert
+Content-Type: application/json
+
+{
+  "device_id": "IHD001",
+  "heart_rate": 145,
+  "gps": {
+    "lat": 12.97,
+    "lon": 77.59
+  }
+}
