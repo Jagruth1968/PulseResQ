@@ -8,4 +8,8 @@ Content-Type: application/json
     "lat": 12.97,
     "lon": 77.59
   }
+ 
+
 }
+### Find nearest hospital (test near central Bengaluru)
+GET http://localhost:3000/nearest-hospital?lat=12.9716&lon=77.5946
