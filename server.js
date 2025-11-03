@@ -1,396 +1,320 @@
-// server.js
-require('dotenv').config();
-const express = require('express');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const nodemailer = require('nodemailer');
-const Twilio = require('twilio');
+// ---------- Replace/insert these functions & routes into server.js ----------
 
+// 🌍 PulseResQ Server (ESM Compatible)
+// ✅ Import section
+import express from "express";
+import fs from "fs";
+import axios from "axios";
+import cors from "cors";
+import dotenv from "dotenv";
+import fetch from "node-fetch";
+import nodemailer from "nodemailer";
+import twilio from "twilio";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ✅ ES Module path fix
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ✅ Initialize environment & app
+dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Twilio client (optional — requires .env filled)
-let twilioClient = null;
-try {
-  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-    twilioClient = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  }
-} catch (e) {
-  console.warn('Twilio init failed:', e.message);
-}
-
-// Nodemailer transporter (optional — requires .env EMAIL_USER / EMAIL_PASS)
-let mailTransporter = null;
-if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-  mailTransporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-  });
-}
 
 app.use(cors());
 app.use(express.json());
 
-// simple rate limiter
-app.use(rateLimit({ windowMs: 60 * 1000, max: 30 }));
+// ✅ Confirm environment loaded
+console.log("✅ Environment variables loaded successfully");
 
-// local fallback hospitals file
-const LOCAL_HOSPITALS_PATH = path.join(__dirname, 'data', 'hospitals.json');
-let LOCAL_HOSPITALS = [];
-try {
-  LOCAL_HOSPITALS = JSON.parse(fs.readFileSync(LOCAL_HOSPITALS_PATH, 'utf8'));
-} catch (e) {
-  console.warn('Could not read local hospitals.json, continuing with empty fallback.');
-}
 
-// simple in-memory cache
-const cache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const {
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE,
+  EMAIL_USER,
+  EMAIL_PASS
+} = process.env;
 
-// ---------- utilities ----------
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : NaN;
-}
+// Twilio client
+const twClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+  : null;
 
-// haversine in km
-function haversineKm(aLat, aLon, bLat, bLon) {
-  const toRad = v => (v * Math.PI) / 180;
-  const R = 6371;
-  const dLat = toRad(bLat - aLat);
-  const dLon = toRad(bLon - aLon);
-  const A =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(A), Math.sqrt(1 - A));
-}
-
-// detect cardiac hospital by tags/name
-function looksLikeCardiac(h) {
-  const keywords = ['cardio', 'cardiac', 'heart', 'cardiology', 'coronary', 'cath'];
-  const name = (h.name || '') + ' ' + (h.tags && (h.tags.healthcare || h.tags.operator || '') || '');
-  const text = String(name).toLowerCase();
-  return keywords.some(k => text.includes(k));
-}
-
-// polite axios headers for Overpass/Nominatim
-const defaultHeaders = { 'User-Agent': 'PulseResQ/1.0 (student project; contact: your@email.com)' };
-
-// ---------- Overpass + Nominatim fetch ----------
-async function fetchHospitalsFromOverpass(lat, lon, radius = 8000) {
-  // build Overpass query: nodes / ways / relations with amenity=hospital
-  const query = `
-    [out:json][timeout:25];
-    (
-      node["amenity"="hospital"](around:${radius},${lat},${lon});
-      way["amenity"="hospital"](around:${radius},${lat},${lon});
-      relation["amenity"="hospital"](around:${radius},${lat},${lon});
-    );
-    out center tags;
-  `;
-  const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
-
-  const resp = await axios.get(url, { headers: defaultHeaders, timeout: 20000 });
-  const els = resp.data.elements || [];
-  const items = els
-    .map(el => {
-      const latLon = el.type === 'node' ? { lat: el.lat, lon: el.lon } : (el.center ? { lat: el.center.lat, lon: el.center.lon } : {});
-      return {
-        id: el.id,
-        type: el.type,
-        name: (el.tags && (el.tags.name || el.tags.operator)) || 'Unknown Hospital',
-        tags: el.tags || {},
-        lat: latLon.lat,
-        lon: latLon.lon,
-        // optional fields that may be present
-        phone: el.tags && (el.tags['contact:phone'] || el.tags.phone || el.tags['phone']),
-        website: el.tags && el.tags.website,
-        address: [
-          el.tags && el.tags['addr:street'],
-          el.tags && el.tags['addr:city'],
-          el.tags && el.tags['addr:postcode']
-        ].filter(Boolean).join(', ')
-      };
-    })
-    .filter(h => typeof h.lat === 'number' && typeof h.lon === 'number');
-
-  return items;
-}
-
-async function nominatimReverse(lat, lon) {
-  try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`;
-    const r = await axios.get(url, { headers: defaultHeaders, timeout: 10000 });
-    return r.data;
-  } catch (e) {
-    return null;
-  }
-}
-
-// ---------- ROUTE: nearest hospital ----------
-app.get('/nearest-hospital', async (req, res) => {
-  try {
-    // accept either query or body
-    const lat = toNumber(req.query.lat ?? req.body?.lat ?? req.query.latitude ?? req.body?.latitude);
-    const lon = toNumber(req.query.lon ?? req.body?.lon ?? req.query.longitude ?? req.body?.longitude);
-
-    if (isNaN(lat) || isNaN(lon)) return res.status(400).json({ error: 'Missing or invalid lat/lon' });
-
-    const cacheKey = `${lat},${lon}`;
-    const now = Date.now();
-    if (cache.has(cacheKey)) {
-      const c = cache.get(cacheKey);
-      if (now - c.ts < CACHE_TTL) {
-        return res.json({ source: 'cache', ...c.value });
-      } else cache.delete(cacheKey);
-    }
-
-    // try Overpass first
-    let hospitals = [];
-    try {
-      hospitals = await fetchHospitalsFromOverpass(lat, lon, 10000); // 10 km default radius
-    } catch (e) {
-      console.warn('Overpass failed:', e.message);
-    }
-
-    // fallback to local file if none
-    if (!hospitals || hospitals.length === 0) {
-      hospitals = (LOCAL_HOSPITALS || []).map(h => ({
-        ...h,
-        lat: toNumber(h.latitude),
-        lon: toNumber(h.longitude)
-      }));
-    }
-
-    if (!hospitals || hospitals.length === 0) {
-      return res.status(404).json({ error: 'No hospitals found' });
-    }
-
-    // if query includes ecg=irregular then prefer cardiac hospitals
-    const ecg = req.query.ecg || req.body?.ecg;
-    let filtered = hospitals;
-    if (String(ecg).toLowerCase() === 'irregular') {
-      const cardiac = hospitals.filter(looksLikeCardiac);
-      if (cardiac.length > 0) filtered = cardiac;
-    }
-
-    // compute distances
-    const ranked = filtered
-      .map(h => {
-        const d = haversineKm(lat, lon, Number(h.lat), Number(h.lon));
-        return { ...h, distance_km: Number.isFinite(d) ? +d.toFixed(3) : Infinity };
-      })
-      .sort((a, b) => a.distance_km - b.distance_km);
-
-    if (ranked.length === 0) return res.status(404).json({ error: 'No hospitals found after filtering' });
-
-    // reverse geocode nearest for nicer address
-    const nearest = ranked[0];
-    const rev = await nominatimReverse(nearest.lat, nearest.lon);
-    const address = rev?.display_name || nearest.address || 'Address unavailable';
-
-    const result = {
-      nearest: {
-        name: nearest.name,
-        lat: nearest.lat,
-        lon: nearest.lon,
-        phone: nearest.phone || null,
-        address
-      },
-      alternatives: ranked.slice(1, 4).map(h => ({
-        name: h.name,
-        lat: h.lat,
-        lon: h.lon,
-        phone: h.phone || null,
-        distance_km: h.distance_km
-      }))
-    };
-
-    cache.set(cacheKey, { ts: now, value: result });
-    return res.json(result);
-  } catch (err) {
-    console.error('nearest-hospital error:', err.message || err);
-    return res.status(500).json({ error: 'Internal Server Error' });
-  }
+// Nodemailer transporter (Gmail example)
+const mailer = nodemailer.createTransport({
+  service: 'gmail',
+  auth: { user: EMAIL_USER, pass: EMAIL_PASS }
 });
 
-// ---------- helper: send alert to single hospital ----------
-async function sendAlertToHospital(hospital, patientPayload, opts = {}) {
-  // hospital: { name, lat, lon, phone, webhook }
-  // patientPayload: { device_id, ecg, spo2, location, last30s }
-  // returns { accepted: bool, hospital, reason }
+// Utility: send webhook POST to hospital (if it exposes webhook)
+async function sendWebhook(hospital, payload, timeout = 5000) {
+  if (!hospital.webhook) return null;
   try {
-    // try webhook if present
-    if (hospital.webhook) {
-      try {
-        const r = await axios.post(hospital.webhook, patientPayload, { timeout: 5000 });
-        if (r.status >= 200 && r.status < 300 && r.data && r.data.accepted) {
-          return { accepted: true, hospital, reason: 'webhook-accepted' };
-        }
-      } catch (e) {
-        // webhook failed/timeouts -> fallback
-      }
-    }
-
-    // CASE: no webhook or webhook didn't accept: fallback to call/SMS/email
-    // 1) call hospital phone via Twilio (if we have credentials)
-    if (twilioClient && hospital.phone) {
-      try {
-        // Make a call — here we create a simple TwiML Bin URL or Twilio whisper — for demo we do a call that reads text via TwiML from Twilio's TwiML app (simplified)
-        await twilioClient.calls.create({
-          to: hospital.phone,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          twiml: `<Response><Say voice="alice">Emergency alert: patient with cardiac emergency requires immediate attention. Check your email for patient data and location.</Say></Response>`
-        });
-        // assume success -> treat as accepted by hospital (in real world you'd wait for a confirmation route)
-        return { accepted: true, hospital, reason: 'twilio-call-sent' };
-      } catch (e) {
-        // call failed -> continue fallback
-      }
-    }
-
-    // 2) send SMS via Twilio
-    if (twilioClient && hospital.phone) {
-      try {
-        const sms = await twilioClient.messages.create({
-          body: `EMERGENCY: Patient near ${patientPayload.location.lat},${patientPayload.location.lon}. Check email for details.`,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to: hospital.phone
-        });
-        return { accepted: true, hospital, reason: 'twilio-sms-sent' };
-      } catch (e) {
-        // continue
-      }
-    }
-
-    // 3) send email to hospital email if we have (we attempt only if mail transporter is configured and hospital has tags.email)
-    const hospitalEmail = hospital.tags && (hospital.tags.email || hospital.tags['contact:email']);
-    if (mailTransporter && hospitalEmail) {
-      try {
-        await mailTransporter.sendMail({
-          from: process.env.EMAIL_USER,
-          to: hospitalEmail,
-          subject: 'Emergency alert from PulseResQ',
-          text: `Emergency patient data:\n${JSON.stringify(patientPayload, null, 2)}`
-        });
-        return { accepted: true, hospital, reason: 'email-sent' };
-      } catch (e) {
-        // not accepted
-      }
-    }
-
-    // As last resort, if no comm method available, return not accepted
-    return { accepted: false, hospital, reason: 'no-comm-path' };
+    const resp = await axios.post(hospital.webhook, payload, { timeout });
+    // expect { accepted: true } or similar from hospital webhook
+    if (resp && resp.data && resp.data.accepted) return { accepted: true, hospital, raw: resp.data };
+    return { accepted: false, hospital, raw: resp.data };
   } catch (err) {
-    return { accepted: false, hospital, reason: 'exception', error: err.message };
+    // treat as not accepted / no response
+    return { accepted: false, hospital, error: err.message || 'no-response' };
   }
 }
 
-// ---------- ROUTE: notify-hospitals (tries 3 hospitals concurrently; returns first accepted) ----------
+// Utility: send SMS (Twilio)
+async function sendSms(hospital, message) {
+  if (!twClient) return { ok: false, reason: 'no-twilio-client' };
+  try {
+    const to = hospital.phone || hospital.phone_number || hospital.tel;
+    if (!to) return { ok: false, reason: 'no-phone' };
+    const m = await twClient.messages.create({
+      body: message,
+      from: TWILIO_PHONE,
+      to
+    });
+    return { ok: true, sid: m.sid };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+// Utility: send WhatsApp (Twilio). Requires Twilio WhatsApp sandbox or approved number
+async function sendWhatsapp(hospital, message) {
+  if (!twClient) return { ok: false, reason: 'no-twilio-client' };
+  const toPhone = hospital.phone || hospital.phone_number || hospital.tel;
+  if (!toPhone) return { ok: false, reason: 'no-phone' };
+  try {
+    const m = await twClient.messages.create({
+      from: `whatsapp:${TWILIO_PHONE}`, // twilio sandbox or WhatsApp-enabled number
+      to: `whatsapp:${toPhone}`,
+      body: message
+    });
+    return { ok: true, sid: m.sid };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+// Utility: make a voice call with TwiML message (simple "we need help" message)
+async function makeVoiceCall(hospital, twimlMessage) {
+  if (!twClient) return { ok: false, reason: 'no-twilio-client' };
+  const to = hospital.phone || hospital.phone_number || hospital.tel;
+  if (!to) return { ok: false, reason: 'no-phone' };
+  try {
+    const call = await twClient.calls.create({
+      to,
+      from: TWILIO_PHONE,
+      twiml: `<Response><Say voice="alice">${twimlMessage}</Say></Response>`
+    });
+    return { ok: true, sid: call.sid };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+// Utility: send email fallback
+async function sendEmail(hospital, subject, text) {
+  if (!EMAIL_USER || !EMAIL_PASS) return { ok: false, reason: 'no-email-credentials' };
+  const to = (hospital.email || hospital.contact_email);
+  if (!to) return { ok: false, reason: 'no-email' };
+  try {
+    const info = await mailer.sendMail({
+      from: EMAIL_USER,
+      to,
+      subject,
+      text
+    });
+    return { ok: true, info };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+// Primary notify helper — attempts webhooks first (parallel), if none accept -> fallback notify
+// returns { acceptedHospital, attempts: [ ... ] }
+async function notifyHospitalsPhased(hospitals, patient, options = {}) {
+  // hospitals must be array of objects { name, lat, lon, phone, webhook, email }
+  // Create batches of `batchSize` (default 3) and try each batch sequentially.
+  const batchSize = options.batchSize || 3;
+  const webhookTimeout = options.webhookTimeout || 5000; // ms to wait for webhook response per POST
+  const waitForAcceptanceMs = options.waitForAcceptanceMs || 90_000; // overall wait for the batch to accept
+  const fallbackMessage = options.fallbackMessage ||
+    `EMERGENCY: patient at ${patient.location?.lat},${patient.location?.lon} requires urgent help. Device ${patient.device_id || 'unknown'}. ECG: ${patient.ecg || 'n/a'}, SpO2: ${patient.spo2 || 'n/a'}. Please respond.`;
+
+  const attemptsLog = [];
+
+  for (let i = 0; i < hospitals.length; i += batchSize) {
+    const batch = hospitals.slice(i, i + batchSize);
+    console.log(`📡 Notifying batch ${Math.floor(i / batchSize) + 1} (size ${batch.length})`);
+
+    // 1) Fire webhook posts in parallel
+    const webhookPromises = batch.map(h => sendWebhook(h, { patient }, webhookTimeout));
+    // Wait for all to settle but also watch for an accepted result during the wait
+    const settled = await Promise.all(webhookPromises);
+    // Log attempts
+    settled.forEach(s => attemptsLog.push({ channel: 'webhook', hospital: s.hospital, accepted: !!s.accepted, raw: s.raw || s.error || null }));
+
+    // Check if any accepted
+    const acceptedEntry = settled.find(s => s.accepted);
+    if (acceptedEntry) {
+      console.log(`✅ Hospital accepted via webhook: ${acceptedEntry.hospital.name}`);
+      return { acceptedHospital: acceptedEntry.hospital, attempts: attemptsLog };
+    }
+
+    // 2) No webhook acceptance — send fallback notifications (SMS/Whatsapp/Call/Email)
+    // We'll send them in parallel but don't treat them as 'acceptance' (acceptance must be via webhook)
+    const notifyPromises = batch.map(async (h) => {
+      const sms = await sendSms(h, fallbackMessage).catch(e => ({ ok: false, reason: e.message }));
+      const wa = await sendWhatsapp(h, fallbackMessage).catch(e => ({ ok: false, reason: e.message }));
+      const call = await makeVoiceCall(h, `Emergency! Please respond. Patient location latitude ${patient.location?.lat}, longitude ${patient.location?.lon}.`);
+      const email = await sendEmail(h, 'Emergency Alert - Immediate Assistance Required', `${fallbackMessage}\n\nHospital: ${h.name}`);
+      const result = { hospital: h, sms, whatsapp: wa, call, email };
+      attemptsLog.push({ channel: 'fallback', hospital: h, result });
+      return result;
+    });
+
+    await Promise.allSettled(notifyPromises);
+
+    // 3) Wait a short period for webhooks to respond (hospitals might POST back)
+    console.log(`⏳ Waiting ${waitForAcceptanceMs/1000}s for any acceptance from batch ${Math.floor(i / batchSize) + 1}...`);
+    // Polling approach: we'll wait and periodically check an in-memory acceptances map (if you implement it).
+    // For now: simply sleep for the wait time while webhooks could POST to your /hospital-ack endpoint.
+    await new Promise(r => setTimeout(r, waitForAcceptanceMs));
+
+    // OPTIONAL: If you implement a separate /hospital-ack endpoint that writes to an in-memory map `acceptedMap`,
+    // you could check it here and return early. Example check (if implemented):
+    // if (acceptedMap[patient.device_id]) return { acceptedHospital: acceptedMap[patient.device_id], attempts: attemptsLog };
+
+    console.log(`↪️ No acceptance from batch ${Math.floor(i / batchSize) + 1}; moving to next batch (if any).`);
+  }
+
+  // If we reached here, none accepted
+  return { acceptedHospital: null, attempts: attemptsLog, message: 'No hospital accepted the alert' };
+}
+
+
+// --- Route: /notify-hospitals (internal) ---
+// Expects body: { nearest: {...}, alternatives: [...], patient: {...} }
 app.post('/notify-hospitals', async (req, res) => {
-  // expects { nearest: {...}, alternatives: [...], patient: {...} }
   try {
     const { nearest, alternatives = [], patient } = req.body;
-    if (!nearest || !patient) return res.status(400).json({ error: 'Missing nearest or patient' });
+    if (!nearest || !patient) return res.status(400).json({ error: 'Missing nearest hospital or patient' });
 
-    const hospitals = [nearest, ...alternatives].slice(0, 3);
+    // Build hospital list (nearest first)
+    const hospitals = [nearest, ...alternatives].slice(0, 50); // limit to 50 to avoid wild notifications
+    const result = await notifyHospitalsPhased(hospitals, patient, {
+      batchSize: 3,
+      webhookTimeout: 5000,
+      waitForAcceptanceMs: 90_000
+    });
 
-    // attempt all in parallel (we'll accept the first which returns accepted=true)
-    const attempts = hospitals.map(h => sendAlertToHospital(h, patient));
-
-    const settled = await Promise.all(attempts);
-
-    const accepted = settled.find(s => s && s.accepted);
-    if (accepted) {
-      return res.json({ status: 'accepted', hospital: accepted.hospital, reason: accepted.reason });
+    if (result.acceptedHospital) {
+      return res.json({ status: 'success', accepted_hospital: result.acceptedHospital, attempts: result.attempts });
     } else {
-      return res.status(504).json({ status: 'failed', message: 'No hospital accepted the alert', attempts: settled });
+      return res.status(504).json({ status: 'failed', message: 'No hospital accepted the alert', attempts: result.attempts });
     }
   } catch (err) {
-    console.error('notify-hospitals error:', err);
-    return res.status(500).json({ error: 'Internal Server Error' });
+    console.error('Error in /notify-hospitals:', err);
+    res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
-// ---------- ROUTE: emergency-alert (single endpoint device calls) ----------
-app.post('/emergency-alert', async (req, res) => {
+
+// 🏥 2️⃣ Nearest Hospital Finder (using Overpass API + Distance Filter)
+app.get("/nearest-hospital", async (req, res) => {
   try {
-    // device payload should include device_id, location:{lat,lon}, ecg, spo2, optionally last30s
-    const { device_id, location, ecg, spo2, last30s } = req.body;
-    if (!device_id || !location || toNumber(location.lat) === NaN || toNumber(location.lon) === NaN) {
-      return res.status(400).json({ error: 'Missing device_id or valid location' });
+    const { lat, lon } = req.query;
+    if (!lat || !lon) {
+      return res.status(400).json({ error: "Missing latitude or longitude" });
     }
-    const lat = toNumber(location.lat);
-    const lon = toNumber(location.lon);
 
-    // 1) find nearest hospital by calling internal handler (not HTTP, call the function)
-    // reuse /nearest-hospital logic by invoking the handler code inline:
-    const nearestRes = await (async () => {
-      // small wrapper that calls the same logic
-      const tmpReq = { query: { lat, lon } };
-      // direct call to function above would be cleaner; for clarity re-run essential steps:
-      let hospitals = [];
-      try {
-        hospitals = await fetchHospitalsFromOverpass(lat, lon, 10000);
-      } catch (e) {
-        hospitals = (LOCAL_HOSPITALS || []).map(h => ({ ...h, lat: toNumber(h.latitude), lon: toNumber(h.longitude) }));
-      }
-      if (!hospitals || hospitals.length === 0) throw new Error('No hospitals found');
+    console.log(`🔍 Searching hospitals near: ${lat}, ${lon}`);
 
-      const ranked = hospitals
-        .map(h => ({ ...h, distance_km: haversineKm(lat, lon, Number(h.lat), Number(h.lon)) }))
-        .sort((a, b) => a.distance_km - b.distance_km);
+    // Overpass query for hospitals within 5 km
+    const overpassQuery = `
+      [out:json];
+      (
+        node["amenity"="hospital"](around:5000,${lat},${lon});
+        way["amenity"="hospital"](around:5000,${lat},${lon});
+        relation["amenity"="hospital"](around:5000,${lat},${lon});
+      );
+      out center;
+    `;
 
-      return {
-        nearest: {
-          name: ranked[0].name,
-          lat: ranked[0].lat,
-          lon: ranked[0].lon,
-          phone: ranked[0].phone,
-          tags: ranked[0].tags || {}
-        },
-        alternatives: ranked.slice(1, 4).map(r => ({ name: r.name, lat: r.lat, lon: r.lon, phone: r.phone, tags: r.tags || {} }))
-      };
-    })();
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `data=${encodeURIComponent(overpassQuery)}`
+    });
 
-    // 2) prepare patient payload (last 30s ECG chunk optional)
-    const patientPayload = {
-      device_id,
-      ecg,
-      spo2,
-      timestamp: new Date().toISOString(),
-      location: { lat, lon },
-      last30s: last30s || null
-    };
-
-    // 3) notify hospitals (calls notify-hospitals logic)
-    const notifyRes = await (async () => {
-      const hospitals = [nearestRes.nearest, ...(nearestRes.alternatives || [])].slice(0, 3);
-      const results = await Promise.all(hospitals.map(h => sendAlertToHospital(h, patientPayload)));
-      const accepted = results.find(r => r.accepted);
-      return { accepted, results };
-    })();
-
-    if (notifyRes.accepted) {
-      // success
-      return res.json({
-        status: 'ok',
-        assigned_hospital: notifyRes.accepted.hospital,
-        reason: notifyRes.accepted.reason
-      });
-    } else {
-      return res.status(504).json({ status: 'failed', message: 'No hospital accepted', results: notifyRes.results });
+    const data = await response.json();
+    if (!data.elements || data.elements.length === 0) {
+      return res.status(404).json({ message: "No hospitals found nearby" });
     }
+
+    // Function to calculate distance using Haversine formula
+    function haversine(lat1, lon1, lat2, lon2) {
+      const toRad = (x) => (x * Math.PI) / 180;
+      const R = 6371; // km
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) *
+          Math.cos(toRad(lat2)) *
+          Math.sin(dLon / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    // Map hospitals + calculate distance
+    const hospitals = data.elements
+      .map((el) => {
+        const name =
+          el.tags?.name || el.tags?.["official_name"] || "Unnamed Hospital";
+        const lat2 = el.lat || el.center?.lat;
+        const lon2 = el.lon || el.center?.lon;
+        const distance = haversine(lat, lon, lat2, lon2);
+        return { name, lat: lat2, lon: lon2, distance };
+      })
+      .filter((h) => h.lat && h.lon)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 3); // ✅ Only 3 closest
+
+    console.log(`✅ Found ${hospitals.length} nearest hospitals`);
+    res.json({ count: hospitals.length, hospitals });
   } catch (err) {
-    console.error('emergency-alert error', err);
-    return res.status(500).json({ error: 'Internal Server Error', message: err.message });
+    console.error("❌ Error fetching hospitals:", err.message);
+    res.status(500).json({ status: "failed", message: "Error finding hospitals" });
   }
 });
 
-// ---------- start server ----------
+// === Test Route for Twilio SMS ===
+
+
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+app.get('/test-sms', async (req, res) => {
+  try {
+    const message = await client.messages.create({
+      body: '🚨 Test Alert: PulseResQ server is live and Twilio SMS is working perfectly!',
+      from: process.env.TWILIO_PHONE,
+      to: '+916360049318' // Replace this with your verified number
+    });
+
+    res.status(200).json({
+      success: true,
+      sid: message.sid,
+      status: message.status
+    });
+  } catch (error) {
+    console.error('Twilio SMS Test Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-  console.log(`🚀 PulseResQ server listening at http://localhost:${PORT}`);
+  console.log(`✅ Server running on http://localhost:${PORT}`);
 });
