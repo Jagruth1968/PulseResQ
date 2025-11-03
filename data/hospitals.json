@@ -1,42 +1,37 @@
 [
   {
     "id": 1,
-    "name": "Narayana Institute of Cardiac Sciences",
-    "lat": 12.8008,
-    "lon": 77.6974,
-    "address": "Bommasandra Industrial Area, Bengaluru",
-    "has_IHD_facility": true
+    "name": "Apollo Hospitals",
+    "latitude": 12.9716,
+    "longitude": 77.5946,
+    "phone": "+919876543210",
+    "address": "Bannerghatta Road, Bengaluru"
   },
   {
     "id": 2,
-    "name": "Fortis Hospital, Bannerghatta Road",
-    "lat": 12.8967,
-    "lon": 77.6010,
-    "address": "Bannerghatta Rd, Bengaluru",
-    "has_IHD_facility": true
+    "name": "Fortis Hospital",
+    "latitude": 12.9532,
+    "longitude": 77.6245,
+    "phone": "+919812345678",
+    "address": "Richmond Town, Bengaluru"
   },
   {
     "id": 3,
-    "name": "Manipal Hospital, Old Airport Road",
-    "lat": 12.9583,
-    "lon": 77.6483,
-    "address": "Old Airport Rd, Bengaluru",
-    "has_IHD_facility": true
+    "name": "Manipal Hospitals",
+    "latitude": 12.9592,
+    "longitude": 77.6974,
+    "phone": "+919911223344",
+    "address": "Old Airport Road, Bengaluru"
   },
   {
     "id": 4,
-    "name": "Apollo Hospital, Jayanagar",
-    "lat": 12.9272,
-    "lon": 77.5836,
-    "address": "Jayanagar 3rd Block, Bengaluru",
-    "has_IHD_facility": true
-  },
-  {
-    "id": 5,
-    "name": "Jayadeva Institute of Cardiovascular Sciences and Research",
-    "lat": 12.9255,
-    "lon": 77.5995,
-    "address": "Bannerghatta Main Rd, Bengaluru",
-    "has_IHD_facility": true
+    "name": "Narayana Health",
+    "latitude": 12.8779,
+    "longitude": 77.6637,
+    "phone": "+919855667788",
+    "address": "Bommasandra, Bengaluru"
   }
+
+
+
 ]

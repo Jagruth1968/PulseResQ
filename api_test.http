@@ -1,15 +1,10 @@
-POST http://localhost:3000/api/alert
+POST http://localhost:3000/emergency-alert
 Content-Type: application/json
 
 {
-  "device_id": "IHD001",
-  "heart_rate": 145,
-  "gps": {
-    "lat": 12.97,
-    "lon": 77.59
-  }
- 
-
+  "device_id": "PR-001",
+  "location": { "lat": 12.9716, "lon": 77.5946 },
+  "ecg": 128,
+  "spo2": 87,
+  "last30s": "base64-or-json-if-you-want"
 }
-### Find nearest hospital (test near central Bengaluru)
-GET http://localhost:3000/nearest-hospital?lat=12.9716&lon=77.5946
